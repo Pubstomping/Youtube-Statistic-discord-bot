@@ -1,0 +1,7 @@
+{
+  "$schema": "https://railpack.com/config.schema.json",
+  "provider": "python",
+  "start": {
+    "cmd": "python bot.py"
+  }
+}
