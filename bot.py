@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import discord
 from discord import app_commands
@@ -42,6 +43,46 @@ youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 authenticated_users = set()
 
 # --- HELPER FUNCTIONS ---
+def resolve_channel_id(input_str: str) -> str:
+    """
+    Extracts or looks up a YouTube Channel ID from a raw ID, handle, or full URL.
+    """
+    input_str = input_str.strip()
+
+    # 1. Direct Channel ID format (starts with UC and is 24 chars long)
+    if input_str.startswith("UC") and len(input_str) == 24:
+        return input_str
+
+    # 2. Extract Channel ID if full /channel/UC... URL is provided
+    channel_url_match = re.search(r"youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})", input_str)
+    if channel_url_match:
+        return channel_url_match.group(1)
+
+    # 3. Handle extraction (e.g., @handle or youtube.com/@handle)
+    handle = None
+    if "@" in input_str:
+        handle_match = re.search(r"(@[a-zA-Z0-9_.-]+)", input_str)
+        if handle_match:
+            handle = handle_match.group(1)
+    elif not input_str.startswith("http"):
+        # If user passed just 'MrBeast' without @ or URL structure
+        handle = f"@{input_str}"
+
+    # Query YouTube API using forHandle if handle exists
+    if handle:
+        try:
+            request = youtube.channels().list(
+                part="id",
+                forHandle=handle
+            )
+            response = request.execute()
+            if response.get("items"):
+                return response["items"][0]["id"]
+        except Exception as e:
+            print(f"Error resolving handle '{handle}': {e}")
+
+    return None
+
 def get_yt_stats(channel_id):
     try:
         request = youtube.channels().list(
@@ -56,9 +97,7 @@ def get_yt_stats(channel_id):
             "title": item["snippet"]["title"],
             "custom_url": item["snippet"].get("customUrl", ""),
             "thumbnail": item["snippet"]["thumbnails"]["high"]["url"],
-            "subscribers": int(item["statistics"]["subscriberCount"]),
-            "views": int(item["statistics"]["viewCount"]),
-            "videos": int(item["statistics"]["videoCount"])
+            "views": int(item["statistics"]["viewCount"])
         }
     except Exception as e:
         print(f"YouTube API Error: {e}")
@@ -69,14 +108,12 @@ def create_stats_embed(stats):
     embed = discord.Embed(
         title=f"📊 {stats['title']}",
         url=url,
-        color=discord.Color.from_rgb(255, 0, 0)
+        color=discord.Color.from_rgb(255, 0, 0) # YouTube Red
     )
     embed.set_thumbnail(url=stats["thumbnail"])
-    embed.add_field(name="👥 Subscribers", value=f"**{stats['subscribers']:,}**", inline=True)
-    embed.add_field(name="👁️ Total Views", value=f"**{stats['views']:,}**", inline=True)
-    embed.add_field(name="🎬 Uploads", value=f"**{stats['videos']:,}**", inline=True)
+    embed.add_field(name="👁️ Total Views", value=f"**{stats['views']:,}**", inline=False)
     embed.set_footer(
-        text="YouTube Real-Time Tracker • Railway Hosted",
+        text="PubsTracker - Youtube Real-Time Tracker",
         icon_url="https://www.youtube.com/s/desktop/d743f786/img/favicon.ico"
     )
     return embed
@@ -95,41 +132,53 @@ async def master_auth(interaction: discord.Interaction, password: str):
     else:
         await interaction.response.send_message("❌ Incorrect password. Access denied.", ephemeral=True)
 
-@bot.tree.command(name="add_channel", description="Add a YouTube channel ID to track.")
-@app_commands.describe(channel_id="The YouTube Channel ID (e.g. UC...)")
-async def add_channel(interaction: discord.Interaction, channel_id: str):
+@bot.tree.command(name="add_channel", description="Add a YouTube channel via URL, handle (@name), or Channel ID.")
+@app_commands.describe(channel_input="YouTube URL, @handle, or Channel ID")
+async def add_channel(interaction: discord.Interaction, channel_input: str):
     if not check_auth(interaction):
         return await interaction.response.send_message("🔒 Unauthorized! Authenticate with `/master_auth` first.", ephemeral=True)
     
+    await interaction.response.defer(ephemeral=True) # Defer to give API time to resolve handle/URL
+    
+    channel_id = resolve_channel_id(channel_input)
+    if not channel_id:
+        return await interaction.followup.send("❌ Could not resolve a valid YouTube Channel ID from that URL or handle.")
+
     stats = get_yt_stats(channel_id)
     if not stats:
-        return await interaction.response.send_message("❌ Invalid YouTube Channel ID or channel not found.", ephemeral=True)
+        return await interaction.followup.send("❌ Channel found, but failed to retrieve statistics.")
     
     conn = get_db()
     cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO channels (channel_id) VALUES (?)", (channel_id,))
         conn.commit()
-        await interaction.response.send_message(f"✅ Successfully added **{stats['title']}** (`{channel_id}`) to tracking list.", ephemeral=True)
+        await interaction.followup.send(f"✅ Successfully added **{stats['title']}** (`{channel_id}`) to tracking list.")
     except sqlite3.IntegrityError:
-        await interaction.response.send_message("⚠️ Channel is already being tracked.", ephemeral=True)
+        await interaction.followup.send("⚠️ Channel is already being tracked.")
     finally:
         conn.close()
 
-@bot.tree.command(name="delete_channel", description="Remove a YouTube channel from tracking.")
-@app_commands.describe(channel_id="The YouTube Channel ID to remove")
-async def delete_channel(interaction: discord.Interaction, channel_id: str):
+@bot.tree.command(name="delete_channel", description="Remove a YouTube channel from tracking via URL, handle, or ID.")
+@app_commands.describe(channel_input="YouTube URL, @handle, or Channel ID to remove")
+async def delete_channel(interaction: discord.Interaction, channel_input: str):
     if not check_auth(interaction):
         return await interaction.response.send_message("🔒 Unauthorized! Authenticate with `/master_auth` first.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+    
+    channel_id = resolve_channel_id(channel_input)
+    if not channel_id:
+        return await interaction.followup.send("❌ Could not resolve a valid YouTube Channel ID from that input.")
 
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM channels WHERE channel_id = ?", (channel_id,))
     if cursor.rowcount > 0:
         conn.commit()
-        await interaction.response.send_message(f"🗑️ Removed channel `{channel_id}` from tracking list.", ephemeral=True)
+        await interaction.followup.send(f"🗑️ Removed channel (`{channel_id}`) from tracking list.")
     else:
-        await interaction.response.send_message("⚠️ Channel ID not found in database.", ephemeral=True)
+        await interaction.followup.send("⚠️ Channel ID not found in database.")
     conn.close()
 
 @bot.tree.command(name="set_channel", description="Set the Discord channel for background announcements.")
