@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -39,12 +38,11 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
-# Track authenticated users in memory per session
+# Session auth storage
 authenticated_users = set()
 
 # --- HELPER FUNCTIONS ---
 def get_yt_stats(channel_id):
-    """Fetches real-time statistics for a specific YouTube channel ID."""
     try:
         request = youtube.channels().list(
             part="snippet,statistics",
@@ -67,12 +65,11 @@ def get_yt_stats(channel_id):
         return None
 
 def create_stats_embed(stats):
-    """Generates a clean Discord Embed for channel statistics."""
     url = f"https://www.youtube.com/{stats['custom_url']}" if stats['custom_url'] else "https://www.youtube.com"
     embed = discord.Embed(
         title=f"📊 {stats['title']}",
         url=url,
-        color=discord.Color.from_rgb(255, 0, 0)  # YouTube Red
+        color=discord.Color.from_rgb(255, 0, 0)
     )
     embed.set_thumbnail(url=stats["thumbnail"])
     embed.add_field(name="👥 Subscribers", value=f"**{stats['subscribers']:,}**", inline=True)
